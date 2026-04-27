@@ -1,0 +1,5 @@
+backend/app/storage/
+frontend/dist/
+frontend/node_modules/
+native/build/
+tmp-test/

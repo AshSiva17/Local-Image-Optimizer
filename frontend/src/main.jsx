@@ -1,0 +1,344 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import './styles.css';
+
+const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+
+const formatBytes = (bytes) => {
+  if (!bytes && bytes !== 0) return '-';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+};
+
+const fullUrl = (path) => `${API_BASE}${path}`;
+
+function App() {
+  const [files, setFiles] = useState([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const [job, setJob] = useState(null);
+  const [message, setMessage] = useState('');
+  const [apiStatus, setApiStatus] = useState('checking');
+  const [settings, setSettings] = useState({
+    maxWidth: 1800,
+    maxHeight: 1800,
+    format: 'keep',
+    quality: 82,
+  });
+
+  const totalOriginal = useMemo(() => {
+    const source = job?.files?.length ? job.files.map((file) => file.original_size) : files.map((file) => file.size);
+    return source.reduce((sum, size) => sum + (size || 0), 0);
+  }, [files, job]);
+
+  const totalOutput = useMemo(() => {
+    return job?.files?.reduce((sum, file) => sum + (file.output_size || 0), 0) ?? 0;
+  }, [job]);
+
+  const doneCount = job?.files?.filter((file) => file.status === 'done').length ?? 0;
+  const failedCount = job?.files?.filter((file) => file.status === 'failed').length ?? 0;
+  const canSubmit = files.length > 0 && (!job || ['done', 'failed'].includes(job.status));
+
+  useEffect(() => {
+    fetch(fullUrl('/api/health'))
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error('API unavailable')))
+      .then((health) => setApiStatus(health.native_optimizer ? 'ready' : 'native missing'))
+      .catch(() => setApiStatus('api unavailable'));
+  }, []);
+
+  useEffect(() => {
+    if (!job || ['done', 'failed'].includes(job.status)) return undefined;
+
+    const timer = window.setInterval(async () => {
+      const response = await fetch(fullUrl(`/api/jobs/${job.id}`));
+      if (response.ok) {
+        setJob(await response.json());
+      }
+    }, 900);
+
+    return () => window.clearInterval(timer);
+  }, [job]);
+
+  const addFiles = (incoming) => {
+    const imageFiles = Array.from(incoming).filter((file) => file.type.startsWith('image/'));
+    setFiles((current) => [...current, ...imageFiles]);
+    setJob(null);
+    setMessage(imageFiles.length ? '' : 'Only image files can be added.');
+  };
+
+  const submit = async () => {
+    setMessage('');
+    const form = new FormData();
+    files.forEach((file) => form.append('images[]', file));
+    form.append('max_width', settings.maxWidth);
+    form.append('max_height', settings.maxHeight);
+    form.append('format', settings.format);
+    form.append('quality', settings.quality);
+
+    let response;
+    try {
+      response = await fetch(fullUrl('/api/jobs'), {
+        method: 'POST',
+        body: form,
+      });
+    } catch {
+      setMessage('The Ruby API is not reachable. Start it with `bundle exec rackup -p 4567`.');
+      return;
+    }
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      setMessage(body.error ?? 'The optimizer could not start the job.');
+      return;
+    }
+
+    setJob(await response.json());
+  };
+
+  return (
+    <main>
+      <header className="topbar">
+        <div>
+          <p className="eyebrow">Ruby + C++ + React</p>
+          <h1>Local Image Optimizer</h1>
+        </div>
+        <div className="statusGroup">
+          <div className="statusPill">{job ? job.status : 'ready'}</div>
+          <div className="statusPill muted">{apiStatus}</div>
+        </div>
+      </header>
+
+      <section className="workspace">
+        <aside className="controls" aria-label="Optimization controls">
+          <Dropzone
+            files={files}
+            isDragging={isDragging}
+            setIsDragging={setIsDragging}
+            addFiles={addFiles}
+          />
+
+          <div className="panel">
+            <h2>Output</h2>
+            <label>
+              Format
+              <select value={settings.format} onChange={(event) => setSettings({ ...settings, format: event.target.value })}>
+                <option value="keep">Keep source</option>
+                <option value="jpeg">JPEG</option>
+                <option value="png">PNG</option>
+                <option value="bmp">BMP</option>
+                <option value="tiff">TIFF</option>
+              </select>
+            </label>
+            <label>
+              Quality
+              <input
+                type="range"
+                min="1"
+                max="100"
+                value={settings.quality}
+                onChange={(event) => setSettings({ ...settings, quality: Number(event.target.value) })}
+              />
+              <span className="rangeValue">{settings.quality}</span>
+            </label>
+            <div className="sizeGrid">
+              <label>
+                Max width
+                <input
+                  type="number"
+                  min="1"
+                  value={settings.maxWidth}
+                  onChange={(event) => setSettings({ ...settings, maxWidth: Number(event.target.value) })}
+                />
+              </label>
+              <label>
+                Max height
+                <input
+                  type="number"
+                  min="1"
+                  value={settings.maxHeight}
+                  onChange={(event) => setSettings({ ...settings, maxHeight: Number(event.target.value) })}
+                />
+              </label>
+            </div>
+            <button className="primary" type="button" disabled={!canSubmit} onClick={submit}>
+              Optimize batch
+            </button>
+            {job?.status === 'done' && (
+              <a className="secondary" href={fullUrl(`/api/jobs/${job.id}/export`)}>
+                Download zip
+              </a>
+            )}
+            {message && <p className="message">{message}</p>}
+          </div>
+
+          <Stats
+            files={files.length}
+            done={doneCount}
+            failed={failedCount}
+            totalOriginal={totalOriginal}
+            totalOutput={totalOutput}
+          />
+        </aside>
+
+        <section className="results" aria-label="Optimization results">
+          {job?.files?.length ? (
+            job.files.map((file) => <ResultRow key={file.id} jobId={job.id} file={file} />)
+          ) : (
+            <EmptyState files={files} removeFile={(index) => setFiles((current) => current.filter((_, i) => i !== index))} />
+          )}
+        </section>
+      </section>
+    </main>
+  );
+}
+
+function Dropzone({ files, isDragging, setIsDragging, addFiles }) {
+  const inputRef = useRef(null);
+
+  return (
+    <div
+      className={`dropzone ${isDragging ? 'dragging' : ''}`}
+      onDragOver={(event) => {
+        event.preventDefault();
+        setIsDragging(true);
+      }}
+      onDragLeave={() => setIsDragging(false)}
+      onDrop={(event) => {
+        event.preventDefault();
+        setIsDragging(false);
+        addFiles(event.dataTransfer.files);
+      }}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/bmp,image/tiff,.jpg,.jpeg,.png,.bmp,.tif,.tiff"
+        multiple
+        hidden
+        onChange={(event) => addFiles(event.target.files)}
+      />
+      <button className="dropButton" type="button" onClick={() => inputRef.current?.click()}>
+        Choose images
+      </button>
+      <p>{files.length ? `${files.length} image${files.length === 1 ? '' : 's'} staged` : 'Drag images here for local processing'}</p>
+    </div>
+  );
+}
+
+function Stats({ files, done, failed, totalOriginal, totalOutput }) {
+  const savings = totalOriginal && totalOutput ? Math.round((1 - totalOutput / totalOriginal) * 100) : 0;
+  return (
+    <div className="stats">
+      <div>
+        <strong>{files}</strong>
+        <span>Files</span>
+      </div>
+      <div>
+        <strong>{done}</strong>
+        <span>Done</span>
+      </div>
+      <div>
+        <strong>{failed}</strong>
+        <span>Failed</span>
+      </div>
+      <div>
+        <strong>{savings}%</strong>
+        <span>Saved</span>
+      </div>
+      <p>{formatBytes(totalOriginal)} original / {totalOutput ? formatBytes(totalOutput) : '-' } optimized</p>
+    </div>
+  );
+}
+
+function EmptyState({ files, removeFile }) {
+  if (!files.length) {
+    return (
+      <div className="empty">
+        <h2>No images yet</h2>
+        <p>Stage a batch to see previews, compression totals, dimensions, and download links.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fileList">
+      {files.map((file, index) => (
+        <div className="fileChip" key={`${file.name}-${file.lastModified}`}>
+          <span>{file.name}</span>
+          <small>{formatBytes(file.size)}</small>
+          <button type="button" onClick={() => removeFile(index)} aria-label={`Remove ${file.name}`}>
+            Remove
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ResultRow({ jobId, file }) {
+  const metadata = file.metadata ?? {};
+  const percent = file.original_size && file.output_size
+    ? Math.round((1 - file.output_size / file.original_size) * 100)
+    : 0;
+
+  return (
+    <article className="result">
+      <div className="resultHeader">
+        <div>
+          <h2>{file.name}</h2>
+          <p>{file.status === 'done' ? `${metadata.width} x ${metadata.height} ${metadata.format?.toUpperCase()}` : file.status}</p>
+        </div>
+        <span className={`badge ${file.status}`}>{file.status}</span>
+      </div>
+
+      {file.status === 'done' && (
+        <>
+          <Compare
+            original={fullUrl(`/api/files/${jobId}/original/${encodeURIComponent(file.name)}`)}
+            optimized={fullUrl(`/api/files/${jobId}/optimized/${encodeURIComponent(file.output_name)}`)}
+          />
+          <div className="metrics">
+            <span>Before {formatBytes(file.original_size)}</span>
+            <span>After {formatBytes(file.output_size)}</span>
+            <span>{percent}% saved</span>
+            <a href={fullUrl(`/api/files/${jobId}/optimized/${encodeURIComponent(file.output_name)}`)} download>
+              Download
+            </a>
+          </div>
+        </>
+      )}
+
+      {file.status === 'failed' && <p className="error">{file.error}</p>}
+    </article>
+  );
+}
+
+function Compare({ original, optimized }) {
+  const [split, setSplit] = useState(50);
+
+  return (
+    <div className="compare" style={{ '--split': `${split}%` }}>
+      <img className="optimizedImage" src={optimized} alt="Optimized" />
+      <img className="originalImage" src={original} alt="Original" />
+      <div className="divider" style={{ left: `${split}%` }} />
+      <input
+        className="splitSlider"
+        aria-label="Compare original and optimized image"
+        type="range"
+        min="0"
+        max="100"
+        value={split}
+        onChange={(event) => setSplit(Number(event.target.value))}
+      />
+      <span className="label left">Original</span>
+      <span className="label right">Optimized</span>
+    </div>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<App />);

@@ -1,0 +1,438 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f7f7f4;
+  color: #171717;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+main {
+  min-height: 100vh;
+}
+
+.topbar {
+  align-items: center;
+  background: #ffffff;
+  border-bottom: 1px solid #deded6;
+  display: flex;
+  justify-content: space-between;
+  padding: 22px clamp(18px, 4vw, 44px);
+}
+
+.eyebrow {
+  color: #65746a;
+  font-size: 0.78rem;
+  font-weight: 700;
+  margin: 0 0 5px;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  font-size: clamp(1.8rem, 4vw, 3.4rem);
+  line-height: 1;
+  margin-bottom: 0;
+}
+
+h2 {
+  font-size: 1rem;
+  margin-bottom: 14px;
+}
+
+.statusPill,
+.badge {
+  border: 1px solid #cfd7d0;
+  border-radius: 999px;
+  color: #2b4c3a;
+  font-size: 0.85rem;
+  font-weight: 700;
+  padding: 8px 12px;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.statusGroup {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.statusPill.muted {
+  color: #6a6257;
+}
+
+.workspace {
+  display: grid;
+  gap: 24px;
+  grid-template-columns: minmax(280px, 360px) 1fr;
+  padding: 24px clamp(18px, 4vw, 44px) 44px;
+}
+
+.controls {
+  align-self: start;
+  display: grid;
+  gap: 16px;
+  position: sticky;
+  top: 18px;
+}
+
+.dropzone,
+.panel,
+.stats,
+.result,
+.empty,
+.fileChip {
+  background: #ffffff;
+  border: 1px solid #deded6;
+  border-radius: 8px;
+}
+
+.dropzone {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  min-height: 190px;
+  padding: 22px;
+  text-align: center;
+}
+
+.dropzone.dragging {
+  background: #eef8f0;
+  border-color: #409764;
+}
+
+.dropButton,
+.primary,
+.secondary,
+.fileChip button {
+  align-items: center;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  font-weight: 800;
+  justify-content: center;
+  min-height: 42px;
+  padding: 0 16px;
+  text-decoration: none;
+}
+
+.dropButton,
+.primary {
+  background: #1f6f4a;
+  color: #ffffff;
+}
+
+.primary:disabled {
+  background: #9baaa1;
+  cursor: not-allowed;
+}
+
+.secondary {
+  background: #e8f1ec;
+  color: #17422c;
+}
+
+.panel,
+.stats {
+  padding: 18px;
+}
+
+label {
+  color: #3d463f;
+  display: grid;
+  font-size: 0.86rem;
+  font-weight: 700;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+select,
+input[type="number"] {
+  background: #fbfbfa;
+  border: 1px solid #cfd2ca;
+  border-radius: 6px;
+  min-height: 42px;
+  padding: 0 11px;
+}
+
+input[type="range"] {
+  accent-color: #1f6f4a;
+  width: 100%;
+}
+
+.rangeValue {
+  color: #65746a;
+  font-weight: 800;
+}
+
+.sizeGrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.panel .primary,
+.panel .secondary {
+  width: 100%;
+}
+
+.panel .secondary {
+  margin-top: 10px;
+}
+
+.message,
+.error {
+  color: #a63f2b;
+  font-weight: 700;
+  margin: 12px 0 0;
+}
+
+.stats {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.stats div {
+  display: grid;
+  gap: 2px;
+}
+
+.stats strong {
+  font-size: 1.35rem;
+}
+
+.stats span,
+.stats p {
+  color: #65746a;
+  font-size: 0.78rem;
+}
+
+.stats p {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.results {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.empty {
+  align-content: center;
+  min-height: 520px;
+  padding: 32px;
+  text-align: center;
+}
+
+.empty p {
+  color: #65746a;
+  margin: 0 auto;
+  max-width: 420px;
+}
+
+.fileList {
+  display: grid;
+  gap: 10px;
+}
+
+.fileChip {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  padding: 12px;
+}
+
+.fileChip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileChip small {
+  color: #65746a;
+}
+
+.fileChip button {
+  background: #f0eee8;
+  color: #3f3b33;
+  min-height: 34px;
+}
+
+.result {
+  overflow: hidden;
+}
+
+.resultHeader {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  padding: 16px 18px;
+}
+
+.resultHeader h2 {
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+}
+
+.resultHeader p {
+  color: #65746a;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.badge.done {
+  background: #e8f7ee;
+  border-color: #8cc7a1;
+}
+
+.badge.failed {
+  background: #fff0ec;
+  border-color: #dc9b8e;
+  color: #803220;
+}
+
+.compare {
+  aspect-ratio: 16 / 9;
+  background: #232323;
+  max-height: 560px;
+  min-height: 260px;
+  overflow: hidden;
+  position: relative;
+}
+
+.compare img {
+  height: 100%;
+  inset: 0;
+  object-fit: contain;
+  position: absolute;
+  width: 100%;
+}
+
+.originalImage {
+  clip-path: inset(0 calc(100% - var(--split)) 0 0);
+}
+
+.divider {
+  background: #ffffff;
+  bottom: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1);
+  position: absolute;
+  top: 0;
+  width: 2px;
+}
+
+.splitSlider {
+  bottom: 0;
+  cursor: ew-resize;
+  height: 100%;
+  left: 0;
+  opacity: 0;
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 100%;
+}
+
+.label {
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 999px;
+  color: #141414;
+  font-size: 0.78rem;
+  font-weight: 800;
+  padding: 6px 10px;
+  position: absolute;
+  top: 12px;
+}
+
+.label.left {
+  left: 12px;
+}
+
+.label.right {
+  right: 12px;
+}
+
+.metrics {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 18px 18px;
+}
+
+.metrics span,
+.metrics a {
+  background: #f3f3ef;
+  border-radius: 999px;
+  color: #343a35;
+  font-size: 0.86rem;
+  font-weight: 800;
+  padding: 8px 12px;
+  text-decoration: none;
+}
+
+.metrics a {
+  background: #1f6f4a;
+  color: #ffffff;
+  margin-left: auto;
+}
+
+.error {
+  padding: 0 18px 18px;
+}
+
+@media (max-width: 880px) {
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .controls {
+    position: static;
+  }
+
+}
+
+@media (max-width: 560px) {
+  .topbar {
+    align-items: flex-start;
+    gap: 14px;
+  }
+
+  .sizeGrid,
+  .stats {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .fileChip {
+    grid-template-columns: 1fr;
+  }
+
+  .metrics a {
+    margin-left: 0;
+    width: 100%;
+  }
+}
