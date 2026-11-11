@@ -22,7 +22,7 @@ class NativeIntegrationTest < Minitest::Test
   def app = Rack::TempfileReaper.new(ImageOptimizer::Server)
 
   def upload(name)
-    Rack::Test::UploadedFile.new(File.join(ENV.fetch('IMAGE_OPTIMIZER_FIXTURES'), name), 'application/octet-stream')
+    Rack::Test::UploadedFile.new(File.join(ENV.fetch('IMAGE_OPTIMIZER_FIXTURES'), name), 'application/octet-stream', true)
   end
 
   def submit(images, format: 'keep')

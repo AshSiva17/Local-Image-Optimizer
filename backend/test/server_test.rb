@@ -24,7 +24,7 @@ class ServerTest < Minitest::Test
   def upload(name, content = "image")
     path = File.join(TEST_STORAGE, name)
     File.binwrite(path, content)
-    Rack::Test::UploadedFile.new(path, "image/png")
+    Rack::Test::UploadedFile.new(path, "image/png", true)
   end
 
   def create_job(images)
@@ -61,6 +61,19 @@ class ServerTest < Minitest::Test
       assert_equal job["files"].map { |f| f["output_name"] }.sort, archive.entries.map(&:name).sort
       archive.close
     end
+  end
+
+  def test_binary_upload_preserves_control_bytes_and_original_download
+    bytes = "\x89PNG\r\n\x1a\n\x00\xff\r\n".b
+    job = finish(create_job([upload('binary.png', bytes)])['id'])
+    assert_equal 'done', job['status'], job.inspect
+    file = job['files'].first
+    assert_equal bytes.bytesize, file['original_size']
+    get file['original_url']
+    assert_equal 200, last_response.status
+    assert_equal bytes, last_response.body.b
+    stored = ImageOptimizer::JobStore.find(job['id'])
+    assert_equal bytes, File.binread(stored['files'].first['original_path'])
   end
 
   def test_partial_failure_preserves_error_and_successful_export
