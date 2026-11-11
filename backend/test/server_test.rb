@@ -149,7 +149,7 @@ class ServerTest < Minitest::Test
     previous = ENV['IMAGE_OPTIMIZER_TIMEOUT']
     ENV['IMAGE_OPTIMIZER_TIMEOUT'] = '2'
     job = finish(create_job(%w[crash malformed nooutput hang good].map { |mode| upload("#{mode}.png", mode) })['id'])
-    assert_equal %w[failed failed failed failed done], job['files'].map { |file| file['status'] }
+    assert_equal %w[failed failed failed failed done], job['files'].map { |file| file['status'] }, job['files'].map { |file| [file['name'], file['error']] }.inspect
     assert_includes job['files'][3]['error'], 'processing timeout'
     assert_empty Dir.glob(File.join(ImageOptimizer::OUTPUTS_DIR, job['id'], '.processing-*'))
     assert_equal 1, Dir.children(File.join(ImageOptimizer::OUTPUTS_DIR, job['id'])).length

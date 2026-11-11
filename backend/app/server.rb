@@ -5,6 +5,7 @@ require "sinatra/base"
 require "time"
 require "tempfile"
 require "thread"
+require "monitor"
 require "set"
 require "open3"
 require "timeout"
@@ -39,7 +40,9 @@ module ImageOptimizer
   end
 
   class JobStore
-    LOCK = Mutex.new
+    # Windows cannot reliably open a file while another thread replaces it.
+    # Reentrancy lets update hold one lock across its find/write transaction.
+    LOCK = Monitor.new
 
     def self.create(settings:, files:)
       id = SecureRandom.uuid
@@ -58,6 +61,10 @@ module ImageOptimizer
     end
 
     def self.find(id)
+      LOCK.synchronize { read(id) }
+    end
+
+    def self.read(id)
       return nil unless id.to_s.match?(UUID)
 
       path = path_for(id)
@@ -84,6 +91,10 @@ module ImageOptimizer
     end
 
     def self.write(job)
+      LOCK.synchronize { persist(job) }
+    end
+
+    def self.persist(job)
       Tempfile.create(["job-", ".json"], JOBS_DIR) do |temp|
         temp.write(JSON.pretty_generate(job))
         temp.close
@@ -96,6 +107,8 @@ module ImageOptimizer
 
       File.join(JOBS_DIR, "#{id}.json")
     end
+
+    private_class_method :read, :persist
   end
 
   class QueueFull < StandardError; end
