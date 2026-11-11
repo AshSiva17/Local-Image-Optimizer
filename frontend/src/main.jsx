@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
+import { fetchJson, rememberedJob } from './api';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 
@@ -22,6 +23,9 @@ function App() {
   const [files, setFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [job, setJob] = useState(null);
+  const [restoring, setRestoring] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const [message, setMessage] = useState('');
   const [apiStatus, setApiStatus] = useState('checking');
   const [settings, setSettings] = useState({
@@ -42,11 +46,11 @@ function App() {
 
   const doneCount = job?.files?.filter((file) => file.status === 'done').length ?? 0;
   const failedCount = job?.files?.filter((file) => file.status === 'failed').length ?? 0;
-  const canSubmit = files.length > 0 && (!job || ['done', 'failed'].includes(job.status));
+  const busy = restoring || submitting || (job && !['done', 'failed'].includes(job.status));
+  const canSubmit = files.length > 0 && !busy;
 
   useEffect(() => {
-    fetch(fullUrl('/api/health'))
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error('API unavailable')))
+    fetchJson(fullUrl('/api/health'))
       .then((health) => setApiStatus(health.native_optimizer ? 'ready' : 'native missing'))
       .catch(() => setApiStatus('api unavailable'));
   }, []);
@@ -54,24 +58,63 @@ function App() {
   useEffect(() => {
     if (!job || ['done', 'failed'].includes(job.status)) return undefined;
 
-    const timer = window.setInterval(async () => {
-      const response = await fetch(fullUrl(`/api/jobs/${job.id}`));
-      if (response.ok) {
-        setJob(await response.json());
+    let cancelled = false;
+    let timer;
+    const controller = new AbortController();
+    const poll = async () => {
+      try {
+        const updated = await fetchJson(fullUrl(`/api/jobs/${job.id}`), { signal: controller.signal });
+        if (!cancelled) {
+          setJob(updated);
+          setMessage('');
+          if (!['done', 'failed'].includes(updated.status)) timer = window.setTimeout(poll, 900);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          if (error.status === 404) {
+            rememberedJob.clear();
+            setJob(null);
+            setMessage('This job no longer exists. Select images to start again.');
+            return;
+          }
+          setMessage('Job tracking interrupted. Retrying…');
+          timer = window.setTimeout(poll, 2000);
+        }
       }
-    }, 900);
+    };
+    timer = window.setTimeout(poll, 900);
+    return () => { cancelled = true; controller.abort(); window.clearTimeout(timer); };
+  }, [job?.id, job?.status]);
 
-    return () => window.clearInterval(timer);
-  }, [job]);
+  useEffect(() => {
+    if (job) rememberedJob.set(job.id);
+  }, [job?.id]);
+
+  useEffect(() => {
+    const id = rememberedJob.get();
+    if (!id) { setRestoring(false); return; }
+    fetchJson(fullUrl(`/api/jobs/${encodeURIComponent(id)}`))
+      .then(setJob)
+      .catch((error) => {
+        if (error.status === 404) rememberedJob.clear();
+        setMessage(error.status === 404 ? 'Previous job no longer exists.' : 'Previous job could not be restored. Reload to retry.');
+      })
+      .finally(() => setRestoring(false));
+  }, []);
 
   const addFiles = (incoming) => {
-    const imageFiles = Array.from(incoming).filter((file) => file.type.startsWith('image/'));
-    setFiles((current) => [...current, ...imageFiles]);
+    if (busy || submittingRef.current) return;
+    const imageFiles = Array.from(incoming).filter((file) => /\.(jpe?g|png|bmp|tiff?)$/i.test(file.name));
+    rememberedJob.clear();
+    setFiles((current) => job ? imageFiles : [...current, ...imageFiles]);
     setJob(null);
-    setMessage(imageFiles.length ? '' : 'Only image files can be added.');
+    setMessage(imageFiles.length === incoming.length ? '' : 'Only JPEG, PNG, BMP, and TIFF are supported.');
   };
 
   const submit = async () => {
+    if (!canSubmit || submittingRef.current) return;
+    submittingRef.current = true;
+    setSubmitting(true);
     setMessage('');
     const form = new FormData();
     files.forEach((file) => form.append('images[]', file));
@@ -80,24 +123,18 @@ function App() {
     form.append('format', settings.format);
     form.append('quality', settings.quality);
 
-    let response;
     try {
-      response = await fetch(fullUrl('/api/jobs'), {
+      const body = await fetchJson(fullUrl('/api/jobs'), {
         method: 'POST',
         body: form,
       });
-    } catch {
-      setMessage('The Ruby API is not reachable. Start it with `bundle exec rackup -p 4567`.');
-      return;
+      setJob(body);
+    } catch (error) {
+      setMessage(error.name === 'AbortError' ? 'The API request timed out. Check job tracking before retrying.' : error.message || 'The Ruby API is not reachable.');
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
     }
-
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      setMessage(body.error ?? 'The optimizer could not start the job.');
-      return;
-    }
-
-    setJob(await response.json());
   };
 
   return (
@@ -120,10 +157,17 @@ function App() {
             isDragging={isDragging}
             setIsDragging={setIsDragging}
             addFiles={addFiles}
+            disabled={busy}
           />
 
           <div className="panel">
             <h2>Output</h2>
+            <label>
+              Size preset
+              <button type="button" className="secondary" onClick={() => setSettings({ ...settings, maxWidth: 1800, maxHeight: 1800 })}>
+                Apply 1800 × 1800 maximum
+              </button>
+            </label>
             <label>
               Format
               <select value={settings.format} onChange={(event) => setSettings({ ...settings, format: event.target.value })}>
@@ -143,7 +187,8 @@ function App() {
                 value={settings.quality}
                 onChange={(event) => setSettings({ ...settings, quality: Number(event.target.value) })}
               />
-              <span className="rangeValue">{settings.quality}</span>
+              <span className="rangeValue">{settings.quality} / 100</span>
+              <small>JPEG visual quality; TIFF compression effort. PNG and BMP ignore quality.</small>
             </label>
             <div className="sizeGrid">
               <label>
@@ -166,20 +211,23 @@ function App() {
               </label>
             </div>
             <button className="primary" type="button" disabled={!canSubmit} onClick={submit}>
-              Optimize batch
+              {submitting ? 'Uploading…' : 'Optimize batch'}
             </button>
-            {job?.status === 'done' && (
+            {job && ['done', 'failed'].includes(job.status) && doneCount > 0 && (
               <a className="secondary" href={fullUrl(`/api/jobs/${job.id}/export`)}>
                 Download zip
               </a>
             )}
+            {job && <p aria-live="polite">{doneCount + failedCount} / {job.files.length} processed</p>}
+            {job?.errors?.map((error, index) => <p className="error" key={index}>{error}</p>)}
             {message && <p className="message">{message}</p>}
           </div>
 
           <Stats
-            files={files.length}
+            files={job?.files?.length ?? files.length}
             done={doneCount}
             failed={failedCount}
+            savingsOriginal={job?.files?.filter((file) => file.status === 'done').reduce((sum, file) => sum + file.original_size, 0) ?? 0}
             totalOriginal={totalOriginal}
             totalOutput={totalOutput}
           />
@@ -197,7 +245,7 @@ function App() {
   );
 }
 
-function Dropzone({ files, isDragging, setIsDragging, addFiles }) {
+function Dropzone({ files, isDragging, setIsDragging, addFiles, disabled }) {
   const inputRef = useRef(null);
 
   return (
@@ -219,10 +267,11 @@ function Dropzone({ files, isDragging, setIsDragging, addFiles }) {
         type="file"
         accept="image/jpeg,image/png,image/bmp,image/tiff,.jpg,.jpeg,.png,.bmp,.tif,.tiff"
         multiple
+        disabled={disabled}
         hidden
-        onChange={(event) => addFiles(event.target.files)}
+        onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }}
       />
-      <button className="dropButton" type="button" onClick={() => inputRef.current?.click()}>
+      <button className="dropButton" disabled={disabled} type="button" onClick={() => inputRef.current?.click()}>
         Choose images
       </button>
       <p>{files.length ? `${files.length} image${files.length === 1 ? '' : 's'} staged` : 'Drag images here for local processing'}</p>
@@ -230,8 +279,8 @@ function Dropzone({ files, isDragging, setIsDragging, addFiles }) {
   );
 }
 
-function Stats({ files, done, failed, totalOriginal, totalOutput }) {
-  const savings = totalOriginal && totalOutput ? Math.round((1 - totalOutput / totalOriginal) * 100) : 0;
+function Stats({ files, done, failed, savingsOriginal, totalOriginal, totalOutput }) {
+  const savings = savingsOriginal ? Math.round((1 - totalOutput / savingsOriginal) * 100) : 0;
   return (
     <div className="stats">
       <div>
@@ -268,7 +317,7 @@ function EmptyState({ files, removeFile }) {
   return (
     <div className="fileList">
       {files.map((file, index) => (
-        <div className="fileChip" key={`${file.name}-${file.lastModified}`}>
+        <div className="fileChip" key={`${file.name}-${file.lastModified}-${index}`}>
           <span>{file.name}</span>
           <small>{formatBytes(file.size)}</small>
           <button type="button" onClick={() => removeFile(index)} aria-label={`Remove ${file.name}`}>
@@ -306,7 +355,7 @@ function ResultRow({ jobId, file }) {
             <span>Before {formatBytes(file.original_size)}</span>
             <span>After {formatBytes(file.output_size)}</span>
             <span>{percent}% saved</span>
-            <a href={fullUrl(`/api/files/${jobId}/optimized/${encodeURIComponent(file.output_name)}`)} download>
+            <a href={fullUrl(`/api/files/${jobId}/optimized/${encodeURIComponent(file.output_name)}?download=1`)} download>
               Download
             </a>
           </div>
@@ -320,11 +369,13 @@ function ResultRow({ jobId, file }) {
 
 function Compare({ original, optimized }) {
   const [split, setSplit] = useState(50);
+  const [previewFailed, setPreviewFailed] = useState(false);
+  if (previewFailed) return <p className="metrics">This browser cannot preview this format. Download the file to inspect it.</p>;
 
   return (
     <div className="compare" style={{ '--split': `${split}%` }}>
-      <img className="optimizedImage" src={optimized} alt="Optimized" />
-      <img className="originalImage" src={original} alt="Original" />
+      <img className="optimizedImage" src={optimized} onError={() => setPreviewFailed(true)} alt="Optimized" />
+      <img className="originalImage" src={original} onError={() => setPreviewFailed(true)} alt="Original" />
       <div className="divider" style={{ left: `${split}%` }} />
       <input
         className="splitSlider"

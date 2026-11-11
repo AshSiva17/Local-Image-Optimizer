@@ -3,12 +3,17 @@ require "json"
 require "securerandom"
 require "sinatra/base"
 require "time"
+require "tempfile"
+require "thread"
+require "set"
+require "open3"
+require "timeout"
 require "zip"
 
 module ImageOptimizer
   ROOT = File.expand_path("..", __dir__)
   PROJECT_ROOT = File.expand_path("../..", __dir__)
-  DATA_DIR = File.join(ROOT, "storage")
+  DATA_DIR = ENV.fetch("IMAGE_OPTIMIZER_STORAGE", File.join(ROOT, "storage"))
   JOBS_DIR = File.join(DATA_DIR, "jobs")
   UPLOADS_DIR = File.join(DATA_DIR, "uploads")
   OUTPUTS_DIR = File.join(DATA_DIR, "outputs")
@@ -18,8 +23,24 @@ module ImageOptimizer
   )
 
   FileUtils.mkdir_p([JOBS_DIR, UPLOADS_DIR, OUTPUTS_DIR])
+  # Hold for the process lifetime. Recovery must never touch a live worker's jobs.
+  STORAGE_LOCK = File.open(File.join(DATA_DIR, "server.lock"), "a")
+  unless STORAGE_LOCK.flock(File::LOCK_EX | File::LOCK_NB)
+    raise "Another API process is already using #{DATA_DIR}. Run one API process per storage directory."
+  end
+  UUID = /\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
+  def self.safe_file?(path, root)
+    return false unless path && File.file?(path) && !File.symlink?(path)
+
+    File.realpath(path).start_with?(File.realpath(root) + File::SEPARATOR)
+  rescue SystemCallError
+    false
+  end
 
   class JobStore
+    LOCK = Mutex.new
+
     def self.create(settings:, files:)
       id = SecureRandom.uuid
       now = Time.now.utc.iso8601
@@ -37,30 +58,47 @@ module ImageOptimizer
     end
 
     def self.find(id)
-      path = path_for(id)
-      return nil unless File.file?(path)
+      return nil unless id.to_s.match?(UUID)
 
-      JSON.parse(File.read(path))
+      path = path_for(id)
+      return nil unless ImageOptimizer.safe_file?(path, JOBS_DIR)
+
+      job = JSON.parse(File.read(path))
+      return nil unless job.is_a?(Hash) && job["id"] == id && job["files"].is_a?(Array)
+      job
+    rescue JSON::ParserError => error
+      warn "Unreadable job #{id}: #{error.message}"
+      nil
     end
 
     def self.update(id)
-      job = find(id)
-      return nil unless job
+      LOCK.synchronize do
+        job = find(id)
+        return nil unless job
 
-      yield job
-      job["updated_at"] = Time.now.utc.iso8601
-      write(job)
-      job
+        yield job
+        job["updated_at"] = Time.now.utc.iso8601
+        write(job)
+        job
+      end
     end
 
     def self.write(job)
-      File.write(path_for(job.fetch("id")), JSON.pretty_generate(job))
+      Tempfile.create(["job-", ".json"], JOBS_DIR) do |temp|
+        temp.write(JSON.pretty_generate(job))
+        temp.close
+        File.rename(temp.path, path_for(job.fetch("id")))
+      end
     end
 
     def self.path_for(id)
+      raise ArgumentError, "Invalid job ID" unless id.to_s.match?(UUID)
+
       File.join(JOBS_DIR, "#{id}.json")
     end
   end
+
+  class QueueFull < StandardError; end
 
   class Processor
     FORMAT_EXTENSIONS = {
@@ -71,8 +109,41 @@ module ImageOptimizer
     }.freeze
     KEEP_EXTENSIONS = %w[.jpg .jpeg .png .bmp .tif .tiff].freeze
 
+    QUEUE_LOCK = Mutex.new
+    PENDING = Set.new
+
     def self.start(job_id)
-      Thread.new { new(job_id).run }
+      QUEUE_LOCK.synchronize do
+        job = JobStore.find(job_id)
+        return unless job && job["status"] == "queued"
+        return if PENDING.include?(job_id)
+        PENDING.add(job_id)
+        begin
+          queue.push(job_id, true)
+        rescue ThreadError
+          PENDING.delete(job_id)
+          raise QueueFull, "Processing queue is full. Try again later."
+        end
+      end
+    end
+
+    def self.queue
+      return @queue if @worker&.alive?
+
+      @queue ||= SizedQueue.new(16)
+      @worker = Thread.new do
+        loop do
+          id = @queue.pop
+          begin
+            new(id).run
+          rescue StandardError => error
+            warn "Worker error for #{id}: #{error.message}"
+          ensure
+            QUEUE_LOCK.synchronize { PENDING.delete(id) }
+          end
+        end
+      end
+      @queue
     end
 
     def initialize(job_id)
@@ -95,12 +166,20 @@ module ImageOptimizer
       JobStore.update(@job_id) do |job|
         job["status"] = "failed"
         job["errors"] << error.message
+        job["files"].each do |file|
+          next if %w[done failed].include?(file["status"])
+          file["status"] = "failed"
+          file["error"] = error.message
+        end
       end
     end
 
     private
 
     def process_file(file, settings, index)
+      JobStore.update(@job_id) do |job|
+        job["files"][index]["status"] = "processing"
+      end
       input_path = file.fetch("original_path")
       output_name = output_filename(file.fetch("name"), settings.fetch("format"), index)
       output_path = File.join(OUTPUTS_DIR, @job_id, output_name)
@@ -116,30 +195,71 @@ module ImageOptimizer
       command.concat(["--max-width", settings["max_width"].to_s]) if settings["max_width"]
       command.concat(["--max-height", settings["max_height"].to_s]) if settings["max_height"]
 
-      stdout, stderr, status = run_command(command)
-      metadata = JSON.parse(stdout)
-
-      JobStore.update(@job_id) do |job|
-        target = job["files"].find { |candidate| candidate["id"] == file["id"] }
-        target["status"] = status.success? ? "done" : "failed"
-        target["output_name"] = output_name
-        target["output_path"] = output_path
-        target["output_size"] = File.size?(output_path) || 0
-        target["metadata"] = metadata
-        target["error"] = stderr.strip unless status.success?
+      # Preserve the extension for --format keep. Never publish partial native output.
+      Tempfile.create([".processing-", File.extname(output_path)], File.dirname(output_path)) do |temp|
+        temp.close
+        File.unlink(temp.path)
+        command[command.index("--output") + 1] = temp.path
+        stdout, stderr, status = run_command(command)
+        raise(stderr.strip.empty? ? "Native optimizer failed (exit #{status.exitstatus})." : stderr.strip) unless status.success?
+        metadata = JSON.parse(stdout)
+        raise "Native optimizer produced no output." unless ImageOptimizer.safe_file?(temp.path, OUTPUTS_DIR) && File.size?(temp.path)
+        unless metadata.is_a?(Hash) && metadata["width"].is_a?(Integer) && metadata["width"].positive? &&
+            metadata["height"].is_a?(Integer) && metadata["height"].positive? && FORMAT_EXTENSIONS.key?(metadata["format"])
+          raise "Native optimizer returned invalid metadata."
+        end
+        metadata = metadata.select { |key, _| %w[format original_width original_height width height input_size output_size savings_percent].include?(key) }
+        if settings["format"] == "keep"
+          output_name = output_filename(file.fetch("name"), metadata.fetch("format"), index)
+          output_path = File.join(OUTPUTS_DIR, @job_id, output_name)
+        end
+        File.rename(temp.path, output_path)
+        JobStore.update(@job_id) do |job|
+          target = job["files"][index]
+          target.merge!("status" => "done", "output_name" => output_name, "output_path" => output_path,
+            "output_size" => File.size(output_path), "metadata" => metadata)
+        end
       end
     rescue StandardError => error
+      FileUtils.rm_f(output_path) if output_path
       JobStore.update(@job_id) do |job|
-        target = job["files"].find { |candidate| candidate["id"] == file["id"] }
+        target = job["files"][index]
         target["status"] = "failed"
         target["error"] = error.message
       end
     end
 
     def run_command(command)
-      require "open3"
+      limit = Float(ENV.fetch("IMAGE_OPTIMIZER_TIMEOUT", "120"))
+      raise "Processing timeout must be positive." unless limit.positive? && limit.finite?
 
-      Open3.capture3(*command)
+      Open3.popen3(*command) do |stdin, stdout, stderr, wait|
+        stdin.close
+        # Drain both pipes, but retain at most 64 KiB each.
+        readers = [stdout, stderr].map do |pipe|
+          Thread.new do
+            result = +""
+            while (chunk = pipe.read(4096))
+              result << chunk.byteslice(0, [65_536 - result.bytesize, 0].max)
+            end
+            result
+          end
+        end
+        begin
+          status = Timeout.timeout(limit) { wait.value }
+          [readers[0].value, readers[1].value, status]
+        rescue Timeout::Error
+          begin
+            Process.kill("KILL", wait.pid)
+          rescue Errno::ESRCH
+            # The process exited between the timeout and termination.
+          end
+          wait.value
+          raise "Native optimizer exceeded the #{limit}s processing timeout."
+        ensure
+          readers.each(&:join)
+        end
+      end
     end
 
     def output_filename(original_name, target_format, index)
@@ -160,9 +280,48 @@ module ImageOptimizer
     end
   end
 
+  [File.join(JOBS_DIR, "job-*.json"), File.join(OUTPUTS_DIR, "export-*.zip"),
+    File.join(OUTPUTS_DIR, "*", ".processing-*")].each do |pattern|
+    Dir.glob(pattern).each { |path| FileUtils.rm_f(path) }
+  end
+
+  # Only directories explicitly marked as unfinished uploads are candidates for cleanup.
+  referenced_uploads = Dir.glob(File.join(JOBS_DIR, "*.json")).filter_map do |path|
+    job = JobStore.find(File.basename(path, ".json"))
+    job && job["files"].filter_map { |file| File.dirname(file["original_path"]) if file["original_path"] }
+  end.flatten.to_set
+  Dir.glob(File.join(UPLOADS_DIR, "*", ".uploading")).each do |marker|
+    directory = File.dirname(marker)
+    next if File.symlink?(directory) || !File.basename(directory).match?(UUID)
+    if referenced_uploads.include?(directory)
+      FileUtils.rm_f(marker)
+    else
+      FileUtils.remove_entry_secure(directory)
+    end
+  end
+
+  # The queue is in-process. Explicitly fail interrupted work after a restart.
+  Dir.glob(File.join(JOBS_DIR, "*.json")).each do |path|
+    id = File.basename(path, ".json")
+    job = JobStore.find(id)
+    next unless job && %w[queued processing].include?(job["status"])
+
+    JobStore.update(id) do |interrupted|
+      interrupted["status"] = "failed"
+      interrupted["errors"] << "Server restarted before this job completed. Submit the batch again."
+      interrupted["files"].each do |file|
+        next if %w[done failed].include?(file["status"])
+        file["status"] = "failed"
+        file["error"] = "Interrupted by server restart."
+      end
+    end
+  end
+
   class Server < Sinatra::Base
-    set :bind, "0.0.0.0"
+    set :bind, "127.0.0.1"
     set :show_exceptions, false
+    set :raise_errors, false
+    EXPORT_LOCK = Mutex.new
 
     before do
       headers(
@@ -185,28 +344,49 @@ module ImageOptimizer
       uploads = Array(params["images"])
       halt 400, { error: "Upload at least one image." }.to_json if uploads.empty?
 
+      halt 400, { error: "A batch supports at most 50 images." }.to_json if uploads.length > 50
+      uploads.each do |upload|
+        valid = upload.is_a?(Hash) && upload[:tempfile].respond_to?(:path) &&
+          Processor::KEEP_EXTENSIONS.include?(File.extname(upload[:filename].to_s).downcase)
+        halt 400, { error: "Upload JPEG, PNG, BMP, or TIFF files." }.to_json unless valid
+        halt 413, { error: "Each image must be between 1 byte and 50 MB." }.to_json unless File.size(upload[:tempfile].path).between?(1, 50 * 1024 * 1024)
+      end
       settings = normalized_settings(params)
+      accepted = false
       job_upload_dir = File.join(UPLOADS_DIR, SecureRandom.uuid)
       FileUtils.mkdir_p(job_upload_dir)
 
-      files = uploads.each_with_index.map do |upload, index|
-        tempfile = upload.fetch(:tempfile)
-        filename = "#{index + 1}-#{sanitize_filename(upload.fetch(:filename))}"
-        stored_path = File.join(job_upload_dir, filename)
-        FileUtils.copy_file(tempfile.path, stored_path)
-        {
-          "id" => SecureRandom.uuid,
-          "name" => filename,
-          "status" => "queued",
-          "original_path" => stored_path,
-          "original_size" => File.size(stored_path)
-        }
-      end
+      begin
+        marker = File.join(job_upload_dir, ".uploading")
+        File.write(marker, "")
+        files = uploads.each_with_index.map do |upload, index|
+          tempfile = upload.fetch(:tempfile)
+          filename = "#{index + 1}-#{sanitize_filename(upload.fetch(:filename))}"
+          stored_path = File.join(job_upload_dir, filename)
+          FileUtils.copy_file(tempfile.path, stored_path)
+          {
+            "id" => SecureRandom.uuid,
+            "name" => filename,
+            "status" => "queued",
+            "original_path" => stored_path,
+            "original_size" => File.size(stored_path)
+          }
+        end
 
-      job = JobStore.create(settings: settings, files: files)
-      Processor.start(job.fetch("id"))
-      status 202
-      public_job(job).to_json
+        job = JobStore.create(settings: settings, files: files)
+        File.unlink(marker)
+        Processor.start(job.fetch("id"))
+        accepted = true
+        status 202
+        public_job(job).to_json
+      rescue QueueFull => error
+        halt 503, { error: error.message }.to_json
+      ensure
+        unless accepted
+          FileUtils.remove_entry(job_upload_dir) if File.directory?(job_upload_dir)
+          FileUtils.rm_f(JobStore.path_for(job["id"])) if job
+        end
+      end
     end
 
     get "/api/jobs/:id" do
@@ -220,42 +400,58 @@ module ImageOptimizer
       job = JobStore.find(params["job_id"])
       halt 404 unless job
 
-      file = job["files"].find do |candidate|
-        [candidate["name"], candidate["output_name"]].include?(params["filename"])
-      end
+      key = { "original" => "name", "optimized" => "output_name" }[params["kind"]]
+      halt 404 unless key
+      file = job["files"].find { |candidate| candidate[key] == params["filename"] }
       halt 404 unless file
-
-      path = case params["kind"]
-      when "original" then file["original_path"]
-      when "optimized" then file["output_path"]
-      else halt 404
-      end
-      halt 404 unless path && File.file?(path)
+      halt 404 if params["kind"] == "optimized" && file["status"] != "done"
+      path = file[params["kind"] == "original" ? "original_path" : "output_path"]
+      root = params["kind"] == "original" ? UPLOADS_DIR : OUTPUTS_DIR
+      halt 404 unless ImageOptimizer.safe_file?(path, root)
 
       content_type mime_for(path)
-      send_file path, disposition: "inline"
+      disposition = params["download"] == "1" ? "attachment" : "inline"
+      send_file path, filename: File.basename(path), disposition: disposition
     end
 
     get "/api/jobs/:id/export" do
       job = JobStore.find(params["id"])
       halt 404, { error: "Job not found." }.to_json unless job
 
-      zip_path = File.join(OUTPUTS_DIR, "#{job["id"]}.zip")
-      Zip::File.open(zip_path, create: true) do |zip|
-        job["files"].each do |file|
-          next unless file["status"] == "done" && File.file?(file["output_path"])
+      halt 409, { error: "Wait for the job to finish before exporting." }.to_json unless %w[done failed].include?(job["status"])
+      completed = job["files"].select { |file| file["status"] == "done" && ImageOptimizer.safe_file?(file["output_path"], OUTPUTS_DIR) }
+      halt 409, { error: "No successful outputs to export." }.to_json if completed.empty?
 
-          zip.add(file["output_name"], file["output_path"]) unless zip.find_entry(file["output_name"])
+      zip_path = File.join(OUTPUTS_DIR, "#{job['id']}.zip")
+      EXPORT_LOCK.synchronize do
+        halt 404 if File.symlink?(zip_path)
+        unless File.file?(zip_path)
+          Tempfile.create(["export-", ".zip"], OUTPUTS_DIR) do |temp|
+            temp.close
+            Zip::OutputStream.open(temp.path) do |zip|
+              completed.each do |file|
+                name = file["output_name"]
+                raise "Unsafe archive entry." unless name && name.match?(/\A[a-zA-Z0-9._-]+\z/) && !%w[. ..].include?(name)
+                zip.put_next_entry(name)
+                File.open(file["output_path"], "rb") do |input|
+                  while (chunk = input.read(64 * 1024))
+                    zip.write(chunk)
+                  end
+                end
+              end
+            end
+            File.rename(temp.path, zip_path)
+          end
         end
       end
-
       content_type "application/zip"
-      send_file zip_path, filename: "optimized-images-#{job["id"]}.zip", disposition: "attachment"
+      send_file zip_path, filename: "optimized-images-#{job['id']}.zip", disposition: "attachment"
     end
 
     error do
       status 500
-      { error: env["sinatra.error"].message }.to_json
+      warn "API error: #{env["sinatra.error"].message}"
+      { error: "The API could not complete the request." }.to_json
     end
 
     helpers do
@@ -269,27 +465,33 @@ module ImageOptimizer
       end
 
       def allowed_format(value)
-        value = value.to_s.downcase
-        %w[keep jpeg png bmp tiff].include?(value) ? value : "keep"
+        value = value.nil? ? "keep" : value.to_s.downcase
+        halt 400, { error: "Unsupported output format." }.to_json unless %w[keep jpeg png bmp tiff].include?(value)
+        value
       end
 
       def clamp_integer(value, min, max, fallback)
         integer = Integer(value || fallback)
-        [[integer, min].max, max].min
+        halt 400, { error: "Quality must be an integer from 1 to 100." }.to_json unless integer.between?(min, max)
+        integer
       rescue ArgumentError, TypeError
-        fallback
+        halt 400, { error: "Quality must be an integer from 1 to 100." }.to_json
       end
 
       def optional_positive_integer(value)
+        return nil if value.nil? || value == ""
         integer = Integer(value)
-        integer.positive? ? integer : nil
+        halt 400, { error: "Dimensions must be integers from 1 to 100000." }.to_json unless integer.between?(1, 100_000)
+        integer
       rescue ArgumentError, TypeError
-        nil
+        halt 400, { error: "Dimensions must be integers from 1 to 100000." }.to_json
       end
 
       def sanitize_filename(filename)
-        cleaned = File.basename(filename).gsub(/[^a-zA-Z0-9._-]/, "-")
-        cleaned.empty? ? "image" : cleaned
+        cleaned = File.basename(filename.tr("\\", "/")).gsub(/[^a-zA-Z0-9._-]/, "-")
+        return "image" if cleaned.empty?
+        extension = File.extname(cleaned)
+        "#{File.basename(cleaned, extension).byteslice(0, 64)}#{extension}"
       end
 
       def public_job(job)

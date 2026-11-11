@@ -1,0 +1,98 @@
+name: Verify
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: backend
+      - run: bundle exec ruby test/server_test.rb
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: backend
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: browser-failure-traces
+          path: frontend/test-results/
+          retention-days: 7
+  native-windows:
+    # Keep the OS/compiler family explicit; this verifies MSVC x64 + actual Windows WIC.
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: backend
+      - name: Configure and build MSVC x64
+        shell: powershell
+        run: |
+          cmake -S native -B native/build -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build native/build --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Decode and validate real native outputs
+        run: ./scripts/test-native.ps1
+        shell: powershell
+      - name: Verify API orchestration and recovery on Windows
+        run: bundle exec ruby test/server_test.rb
+        working-directory: backend
+      - name: Generate real image fixtures
+        shell: powershell
+        run: ./scripts/new-test-images.ps1 -Directory "$env:RUNNER_TEMP\optimizer-fixtures"
+      - name: Upload through Sinatra and download real WIC results
+        shell: powershell
+        working-directory: backend
+        env:
+          IMAGE_OPTIMIZER_FIXTURES: ${{ runner.temp }}\optimizer-fixtures
+        run: |
+          bundle exec ruby test/native_integration_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Benchmark actual native processing
+        shell: powershell
+        run: ./scripts/benchmark-native.ps1 -Report benchmark-results/native.json
+      - name: Save measured results
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-native-benchmark-${{ github.sha }}
+          path: benchmark-results/native.json
+          if-no-files-found: error
+          retention-days: 30

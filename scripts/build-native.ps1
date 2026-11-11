@@ -24,4 +24,6 @@ $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $native = Join-Path $root "native"
 $build = Join-Path $native "build"
 
-cmd.exe /c "call `"$vcvars`" && `"$cmake`" -S `"$native`" -B `"$build`" -G `"NMake Makefiles`" && `"$cmake`" --build `"$build`" --config Release"
+cmd.exe /c "call `"$vcvars`" && `"$cmake`" -S `"$native`" -B `"$build`" -G `"NMake Makefiles`" -DCMAKE_BUILD_TYPE=Release -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=`"$build\Release`" && `"$cmake`" --build `"$build`" --config Release"
+
+if ($LASTEXITCODE -ne 0) { throw "Native build failed (exit $LASTEXITCODE)." }

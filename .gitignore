@@ -1,5 +1,10 @@
-backend/app/storage/
+backend/storage/
 frontend/dist/
 frontend/node_modules/
 native/build/
 tmp-test/
+
+.DS_Store
+frontend/test-results/
+frontend/playwright-report/
+benchmark-results/

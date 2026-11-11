@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cctype>
+#include <iomanip>
+#include <limits>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -108,7 +111,7 @@ std::string json_escape(const std::string& value) {
       case '\t': out << "\\t"; break;
       default:
         if (static_cast<unsigned char>(ch) < 0x20) {
-          out << "\\u00" << std::hex << static_cast<int>(ch);
+          out << "\\u00" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(static_cast<unsigned char>(ch)) << std::dec;
         } else {
           out << ch;
         }
@@ -125,15 +128,28 @@ Options parse_args(int argc, char** argv) {
     if (key.rfind("--", 0) != 0 || i + 1 >= argc) {
       throw std::runtime_error("Expected arguments in --key value form.");
     }
-    args[key.substr(2)] = argv[i + 1];
+    key = key.substr(2);
+    if (key != "input" && key != "output" && key != "format" && key != "quality" && key != "max-width" && key != "max-height") {
+      throw std::runtime_error("Unknown option: --" + key);
+    }
+    if (args.count(key)) throw std::runtime_error("Duplicate option: --" + key);
+    args[key] = argv[i + 1];
   }
 
   if (args.count("input")) options.input = widen(args["input"]);
   if (args.count("output")) options.output = widen(args["output"]);
   if (args.count("format")) options.format = args["format"];
-  if (args.count("max-width")) options.max_width = static_cast<UINT>(std::stoul(args["max-width"]));
-  if (args.count("max-height")) options.max_height = static_cast<UINT>(std::stoul(args["max-height"]));
-  if (args.count("quality")) options.quality = std::clamp(std::stoi(args["quality"]), 1, 100);
+  auto positive_integer = [](const std::string& text, unsigned long long maximum) {
+    if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos) {
+      throw std::runtime_error("Expected a positive integer.");
+    }
+    auto value = std::stoull(text);
+    if (!value || value > maximum) throw std::runtime_error("Integer option is out of range.");
+    return value;
+  };
+  if (args.count("max-width")) options.max_width = static_cast<UINT>(positive_integer(args["max-width"], std::numeric_limits<UINT>::max()));
+  if (args.count("max-height")) options.max_height = static_cast<UINT>(positive_integer(args["max-height"], std::numeric_limits<UINT>::max()));
+  if (args.count("quality")) options.quality = static_cast<int>(positive_integer(args["quality"], 100));
 
   if (options.input.empty() || options.output.empty()) {
     throw std::runtime_error("--input and --output are required.");
@@ -141,21 +157,13 @@ Options parse_args(int argc, char** argv) {
   if (options.format.empty()) {
     options.format = "keep";
   }
-  std::transform(options.format.begin(), options.format.end(), options.format.begin(), ::tolower);
+  std::transform(options.format.begin(), options.format.end(), options.format.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
   return options;
 }
 
-GUID container_for_format(const Options& options) {
-  std::string format = options.format;
-  if (format == "keep") {
-    std::string ext = fs::path(options.output).extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    if (ext == ".jpg" || ext == ".jpeg") format = "jpeg";
-    if (ext == ".png") format = "png";
-    if (ext == ".bmp") format = "bmp";
-    if (ext == ".tif" || ext == ".tiff") format = "tiff";
-    if (format == "keep" && !ext.empty()) format = "png";
-  }
+GUID container_for_format(const Options& options, const GUID& source_container) {
+  const std::string& format = options.format;
+  if (format == "keep") return source_container;
 
   if (format == "jpeg" || format == "jpg") return GUID_ContainerFormatJpeg;
   if (format == "png") return GUID_ContainerFormatPng;
@@ -191,17 +199,34 @@ void set_quality(IPropertyBag2* bag, const GUID& container, int quality) {
   }
 
   PROPBAG2 option = {};
-  option.pstrName = const_cast<LPOLESTR>(L"ImageQuality");
+  option.pstrName = const_cast<LPOLESTR>(IsEqualGUID(container, GUID_ContainerFormatTiff) ? L"CompressionQuality" : L"ImageQuality");
 
   VARIANT value;
   VariantInit(&value);
   value.vt = VT_R4;
   value.fltVal = static_cast<float>(quality) / 100.0f;
-  bag->Write(1, &option, &value);
+  HRESULT hr = bag->Write(1, &option, &value);
   VariantClear(&value);
+  check(hr, "Failed to set encoder quality.");
 }
 
+// Delete a newly created output on errors, after COM streams have released it.
+struct OutputCleanup {
+  fs::path path;
+  bool committed = false;
+  ~OutputCleanup() {
+    if (!committed) {
+      std::error_code ignored;
+      fs::remove(path, ignored);
+    }
+  }
+};
+
 int run(const Options& options) {
+  if (fs::exists(options.output)) {
+    throw std::runtime_error("Output already exists; choose a new file to avoid overwriting data.");
+  }
+  OutputCleanup cleanup{fs::path(options.output)};
   ComRuntime com;
 
   ComPtr<IWICImagingFactory> factory;
@@ -210,12 +235,23 @@ int run(const Options& options) {
   ComPtr<IWICBitmapDecoder> decoder;
   check(factory->CreateDecoderFromFilename(options.input.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder), "Failed to open input image.");
 
+  GUID source_container;
+  check(decoder->GetContainerFormat(&source_container), "Failed to read input format.");
+  if (!IsEqualGUID(source_container, GUID_ContainerFormatJpeg) && !IsEqualGUID(source_container, GUID_ContainerFormatPng) &&
+      !IsEqualGUID(source_container, GUID_ContainerFormatBmp) && !IsEqualGUID(source_container, GUID_ContainerFormatTiff)) {
+    throw std::runtime_error("Unsupported input format. Use JPEG, PNG, BMP, or TIFF.");
+  }
+
   ComPtr<IWICBitmapFrameDecode> source_frame;
   check(decoder->GetFrame(0, &source_frame), "Failed to decode first image frame.");
 
   UINT original_width = 0;
   UINT original_height = 0;
   check(source_frame->GetSize(&original_width, &original_height), "Failed to read image size.");
+
+  if (!original_width || !original_height || static_cast<std::uint64_t>(original_width) * original_height > 100000000ULL) {
+    throw std::runtime_error("Input must have between 1 and 100 million pixels.");
+  }
 
   UINT target_width = original_width;
   UINT target_height = original_height;
@@ -231,12 +267,8 @@ int run(const Options& options) {
     check(source_frame->QueryInterface(IID_PPV_ARGS(&bitmap_source)), "Failed to use source bitmap.");
   }
 
-  GUID container = container_for_format(options);
+  GUID container = container_for_format(options, source_container);
   WICPixelFormatGUID target_pixel_format = IsEqualGUID(container, GUID_ContainerFormatJpeg) ? GUID_WICPixelFormat24bppBGR : GUID_WICPixelFormat32bppBGRA;
-
-  ComPtr<IWICFormatConverter> converter;
-  check(factory->CreateFormatConverter(&converter), "Failed to create pixel format converter.");
-  check(converter->Initialize(bitmap_source.get(), target_pixel_format, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom), "Failed to convert pixel format.");
 
   ComPtr<IWICStream> stream;
   check(factory->CreateStream(&stream), "Failed to create output stream.");
@@ -253,9 +285,17 @@ int run(const Options& options) {
   check(frame->Initialize(properties.get()), "Failed to initialize output frame.");
   check(frame->SetSize(target_width, target_height), "Failed to set output size.");
   check(frame->SetPixelFormat(&target_pixel_format), "Failed to set output pixel format.");
+  ComPtr<IWICFormatConverter> converter;
+  check(factory->CreateFormatConverter(&converter), "Failed to create pixel format converter.");
+  check(converter->Initialize(bitmap_source.get(), target_pixel_format, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom), "Failed to convert pixel format.");
+
   check(frame->WriteSource(converter.get(), nullptr), "Failed to write output image.");
   check(frame->Commit(), "Failed to commit output frame.");
   check(encoder->Commit(), "Failed to commit output image.");
+
+  frame.reset();
+  encoder.reset();
+  stream.reset();
 
   std::uintmax_t input_size = fs::file_size(options.input);
   std::uintmax_t output_size = fs::file_size(options.output);
@@ -276,12 +316,18 @@ int run(const Options& options) {
       << "}"
       << std::endl;
 
+  cleanup.committed = true;
   return 0;
 }
 
-int main(int argc, char** argv) {
+int wmain(int argc, wchar_t** argv) {
   try {
-    return run(parse_args(argc, argv));
+    // Windows passes UTF-16 paths; convert explicitly rather than using the ANSI code page.
+    std::vector<std::string> arguments;
+    for (int i = 0; i < argc; ++i) arguments.push_back(narrow(argv[i]));
+    std::vector<char*> pointers;
+    for (auto& argument : arguments) pointers.push_back(argument.data());
+    return run(parse_args(argc, pointers.data()));
   } catch (const std::exception& error) {
     std::cerr << error.what() << std::endl;
     return 1;
