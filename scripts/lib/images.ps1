@@ -59,6 +59,9 @@ function Assert-Image([string]$Path, [string]$Format, [int]$Width, [int]$Height)
 
 function Invoke-Optimizer([string]$Executable, [string[]]$Arguments) {
   $stderrPath = [System.IO.Path]::GetTempFileName()
+  # Native commands update this global automatic variable even inside a function.
+  # GitHub Actions propagates it as the step exit code after the script returns.
+  $previousExitCode = $global:LASTEXITCODE
   try {
     # Windows PowerShell turns native stderr into ErrorRecords, even for expected failures.
     $previousPreference = $ErrorActionPreference
@@ -66,5 +69,8 @@ function Invoke-Optimizer([string]$Executable, [string[]]$Arguments) {
     try { $stdout = & $Executable @Arguments 2> $stderrPath; $code = $LASTEXITCODE }
     finally { $ErrorActionPreference = $previousPreference }
     return [pscustomobject]@{ Code = $code; Stdout = ($stdout -join "`n"); Stderr = (Get-Content -LiteralPath $stderrPath -Raw) }
-  } finally { Remove-Item -LiteralPath $stderrPath -Force }
+  } finally {
+    $global:LASTEXITCODE = $previousExitCode
+    Remove-Item -LiteralPath $stderrPath -Force
+  }
 }
