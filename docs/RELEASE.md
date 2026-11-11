@@ -35,7 +35,7 @@ No real Windows processing or benchmark result is included in these local result
 
 ## Required Windows evidence
 
-Push the reviewed changes to GitHub and inspect the [Verify workflow](../.github/workflows/verify.yml). A workflow file by itself is not evidence that it passed. No Windows execution has been performed or observed for this working tree in the current session.
+Push the reviewed changes to GitHub and inspect the [Verify workflow](../.github/workflows/verify.yml). A workflow file by itself is not evidence that it passed. Implementation commit `4530992` passed the full [Windows verification run](https://github.com/AshSiva17/Local-Image-Optimizer/actions/runs/42960046389). Its evidence includes 48 native format/quality cases, 14 API reliability tests with 286 assertions, 2 real-WIC API tests with 51 assertions, and an uploaded [48-case benchmark report](https://github.com/AshSiva17/Local-Image-Optimizer/actions/runs/42960046389/artifacts/13828573753). All three jobs (API, frontend, native Windows) succeeded. Preserve the benchmark artifact before its 30-day retention expires.
 
 The `native-windows` job must succeed on the exact release commit:
 
@@ -49,7 +49,7 @@ Run the same scripts manually on Windows 10/11 before describing consumer deskto
 
 ## Remaining decisions and limitations
 
-- A successful Windows run is the main unresolved release gate. Until then, describe native support as implemented and awaiting verification.
+- The Windows CI gate is satisfied for implementation commit `4530992`. Require a successful run on future release commits too. Manual Windows 10/11 UI checks remain outstanding.
 - Choose a repository license. None has been inferred for the owner; a public repository alone does not grant an open-source license.
 - Do not publish private user images, storage, test traces containing personal data, local paths, or credentials. Generated data and build/test artifacts are ignored by Git. Review the final staged diff before pushing.
 - The service remains local and single-user. Authentication, public hosting, multi-process/distributed queues, automatic retention, EXIF/color preservation, multipage TIFFs, and broad browser coverage are outside this release's scope. These limitations are described in the README and should remain visible in portfolio claims.

@@ -1,6 +1,6 @@
 # Reproducible native benchmarks
 
-No real WIC benchmarks have been executed in the macOS development environment. This repository supplies the benchmark harness, not estimated performance claims.
+Real WIC benchmarks cannot execute in the macOS development environment. They have now executed on the Windows Server 2022 x64 runner for implementation commit `4530992`: [successful run](https://github.com/AshSiva17/Local-Image-Optimizer/actions/runs/42960046389), [48-case JSON report](https://github.com/AshSiva17/Local-Image-Optimizer/actions/runs/42960046389/artifacts/13828573753). The artifact expires after 30 days; preserve it with any published release. The report contains measurements, not estimated performance claims.
 
 ## Procedure
 

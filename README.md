@@ -8,7 +8,9 @@ This is a **local, single-user application**. The API binds to loopback and is n
 
 The API fixture tests, Chromium browser tests, and frontend production build have been executed on macOS. They verify orchestration and UI behavior using a deterministic subprocess **in place of WIC**.
 
-**Windows compilation, real WIC processing, and native benchmarks have not been executed in the current local environment.** The [Verify workflow](.github/workflows/verify.yml) builds MSVC x64 on Windows Server 2022, tests real images, exercises the API with the real executable, and uploads measured benchmarks. A successful run of that job is required before claiming Windows support is verified. See [release checks](docs/RELEASE.md).
+**Windows verification passed** for implementation commit `4530992` in [GitHub Actions](https://github.com/AshSiva17/Local-Image-Optimizer/actions/runs/42960046389): MSVC x64 compilation, 48 native format/quality cases, Unicode and invalid-input checks, 14 API reliability tests (286 assertions), and 2 real-WIC API integration tests (51 assertions). The run also generated and uploaded a [48-case benchmark report](https://github.com/AshSiva17/Local-Image-Optimizer/actions/runs/42960046389/artifacts/13828573753). CI artifacts expire after 30 days; preserve the report when publishing a release.
+
+This verifies the Windows Server 2022 x64 runner target. Manual Windows 10/11 UI checks remain a separate release step. See [release checks](docs/RELEASE.md).
 
 ## Architecture
 
@@ -160,7 +162,7 @@ The native suite performs 48 format/quality combinations using real generated fi
 .\scripts\benchmark-native.ps1 -Iterations 3 -Report benchmark-results/native.json
 ```
 
-This generates a fixed-seed corpus and measures all four input/output formats at quality 1, 82, and 100, resizing 2400 × 1200 to 1800 × 900. The report includes sample/median wall time, input/output bytes, size change, corpus hashes, binary hash, source revision, OS, and CPU. CI publishes it only after real Windows tests succeed. **No native timing or size-saving results are claimed until that report is actually produced.** Read the [benchmark methodology](docs/BENCHMARKS.md) before quoting numbers.
+This generates a fixed-seed corpus and measures all four input/output formats at quality 1, 82, and 100, resizing 2400 × 1200 to 1800 × 900. The report includes sample/median wall time, input/output bytes, size change, corpus hashes, binary hash, source revision, OS, and CPU. CI publishes it only after real Windows tests succeed. A [measured Windows report](https://github.com/AshSiva17/Local-Image-Optimizer/actions/runs/42960046389/artifacts/13828573753) is available from the verified run; no universal speed or size-saving claim is implied. Read the [benchmark methodology](docs/BENCHMARKS.md) before quoting numbers.
 
 ## Storage, cleanup, and configuration
 
@@ -178,7 +180,7 @@ Environment variables:
 
 ## Limitations and release gate
 
-- Windows processing is **pending verification** until the Windows CI job passes on the changes being released.
+- The Windows Server 2022 x64 pipeline has passed CI. Require a green Windows job on each new release commit; manual Windows 10/11 UI verification remains outstanding.
 - Run one API process, with no clustered/preloaded Puma workers. The queue is in-process, has no cancellation, and does not resume interrupted work. Disk exhaustion and abrupt power loss can require manual storage repair; filesystem rename is not a database transaction.
 - This is not a multi-tenant service. There is no authentication, TLS termination, global disk quota, or request-body limit before multipart parsing. Keep the API on loopback; do not expose it to untrusted users or shared writable storage.
 - WIC processes the first frame only. Multipage TIFFs, EXIF orientation, ICC/color metadata, and other source metadata are not preserved. Transparent images converted to JPEG are not composited onto a configurable background. Outputs can be larger than inputs.
